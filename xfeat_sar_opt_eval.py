@@ -64,6 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scales", default="1.0", help="对 SAR 图像额外施加的合成尺度，逗号分隔。")
     parser.add_argument("--min-accept-inliers", type=int, default=0, help="质量门控：RANSAC 内点数至少达到该值才标记为 accepted。")
     parser.add_argument("--min-accept-ratio", type=float, default=0.0, help="质量门控：RANSAC 内点比例至少达到该值才标记为 accepted。")
+    parser.add_argument("--rmse-cap", type=float, default=100.0, help="RMSE 上限（像素），超过该值的样本按该值截断后再计算 mean RMSE。0 表示不截断。")
     parser.add_argument("--max-draw", type=int, default=250, help="每张连线图最多绘制多少条匹配线。")
     parser.add_argument("--no-images", action="store_true", help="只输出 CSV，不保存连线图。")
     parser.add_argument("--force-cpu", action="store_true", help="强制使用 CPU，默认优先使用 CUDA。")
@@ -461,12 +462,30 @@ def main() -> None:
     valid_rmse = np.array([float(row["corner_rmse"]) for row in rows if not math.isnan(float(row["corner_rmse"]))])
     print(f"\nCSV: {csv_path}")
     if len(valid_rmse):
+        rmse_cap = args.rmse_cap
+        if rmse_cap > 0:
+            capped_rmse = np.clip(valid_rmse, None, rmse_cap)
+            capped_mean = np.mean(capped_rmse)
+            n_capped = int((valid_rmse > rmse_cap).sum())
+        else:
+            capped_mean = np.mean(valid_rmse)
+            n_capped = 0
+
+        p95 = float(np.percentile(valid_rmse, 95))
         print(
             "Summary: "
             f"cases={len(rows)}, valid={len(valid_rmse)}, "
             f"<=5px={(valid_rmse <= 5).sum()}, <=10px={(valid_rmse <= 10).sum()}, "
-            f"median={np.median(valid_rmse):.2f}px, mean={np.mean(valid_rmse):.2f}px"
+            f"median={np.median(valid_rmse):.2f}px, "
+            f"mean={np.mean(valid_rmse):.2f}px"
         )
+        if rmse_cap > 0:
+            print(
+                f"         "
+                f"mean_capped@{rmse_cap:.0f}={capped_mean:.2f}px  "
+                f"P95={p95:.2f}px  "
+                f"capped={n_capped}/{len(valid_rmse)} samples"
+            )
         accepted_rmse = np.array(
             [
                 float(row["corner_rmse"])
@@ -476,12 +495,14 @@ def main() -> None:
         )
         if args.min_accept_inliers > 0 or args.min_accept_ratio > 0:
             if len(accepted_rmse):
+                p95_acc = float(np.percentile(accepted_rmse, 95))
                 print(
                     "Accepted: "
                     f"cases={len(accepted_rmse)}, "
                     f"<=5px={(accepted_rmse <= 5).sum()}, <=10px={(accepted_rmse <= 10).sum()}, "
                     f"median={np.median(accepted_rmse):.2f}px, mean={np.mean(accepted_rmse):.2f}px"
                 )
+                print(f"         P95={p95_acc:.2f}px")
             else:
                 print("Accepted: cases=0")
     else:

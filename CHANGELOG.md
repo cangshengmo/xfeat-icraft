@@ -172,3 +172,25 @@ checkpoints/{model}-{dataset}-{timestamp}/
 1. 训练图像太少（仅 50 张），域过拟合
 2. 缺少跨模态监督（自监督 warp 只学单图变换不变性）
 3. 缺少 ALIKE 关键点蒸馏
+
+---
+
+### 01:00 — RMSE 统计鲁棒性改进
+
+**动机**：少量灾难性失败样本（RMSE > 100px）会严重拉高 mean RMSE，掩盖模型真实性能。
+
+**操作**：
+- 在 `xfeat_sar_opt_eval.py` 中添加 `--rmse-cap` 参数（默认 100px）
+- 计算 mean 时对单个 RMSE 进行截断，超出 cap 的样本按 cap 值计算
+- 新增 `mean_capped@{cap}` 和 `P95` 指标输出，同时保留原始 mean 作为参考
+- 统计被截断样本数 `capped={N}/{total}`
+
+**示例输出**（预训练模型）：
+```
+Summary: cases=30, valid=30, <=5px=12, <=10px=22, median=5.81px, mean=40.86px
+         mean_capped@100=20.52px  P95=285.87px  capped=4/30 samples
+Accepted: cases=18, <=5px=12, <=10px=18, median=4.04px, mean=4.91px
+         P95=9.10px
+```
+
+**影响**：向后兼容（默认 cap=100），不影响 CSV 输出内容。
