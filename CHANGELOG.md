@@ -222,3 +222,22 @@ acc_kp: 0.014  (之前为 1.000 占位符)
 acc_kp 不再是无意义的 1.0，现在具有实际的 keypoint 定位精度意义。
 
 **影响**：完全向后兼容。ORB 抽取速度比 ALIKE 更快（纯 CPU，无深度学习推理），且无需额外模型文件。
+
+---
+
+### 01:30 — 从 GitHub 下载 ALIKE 模型，替代子模块
+
+**动机**：前面用 ORB 回退解决了关键点蒸馏缺失问题，但 ORB 质量远不如 ALIKE（acc_kp: 0.014 vs 0.286）。
+
+**操作**：
+- 通过 GitHub API 确认 `Shiaoming/ALIKE` 仓库存在（⭐390 stars），但原始 git submodule 因网络原因无法 clone
+- 通过 GitHub Git Data API 下载了 ALIKE 完整源码和4个预训练模型权重（alike-{t,s,n,l}.pth, 共 ~5MB）
+- 从 `.gitmodules` 中移除损坏的子模块配置，将 ALIKE 转为仓库内跟踪的普通目录
+- `third_party/alike_wrapper.py` 保持不变（优先尝试 ALIKE，失败回退 ORB）
+
+**验证**（dry-run 3 步）：
+```
+acc_kp: 0.286  (vs ORB 的 0.014, vs 之前占位符 1.0)
+```
+
+**影响**：ALIKE 的 keypoint 蒸馏质量远超 ORB，预期能显著提升 XFeat 关键点的定位精度。
