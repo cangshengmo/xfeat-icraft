@@ -198,3 +198,27 @@ Summary: cases=30, valid=30, <=5px=12, <=10px=22, median=5.81px, mean=40.86px
 ```
 
 **影响**：向后兼容，默认 `--rmse-transform=log --rmse-threshold=10`。
+
+---
+
+### 01:15 — 解决 ALIKE 关键点蒸馏缺失问题
+
+**动机**：`third_party/ALIKE` git submodule 为空（仓库不可达），导致 `alike_distill_loss` 始终被跳过，关键点头缺少监督信号。
+
+**方案**：将 ALIKE 替换为 OpenCV 内置的 **ORB 关键点检测器**作为回退方案。
+
+**操作**：
+- 重写 `third_party/alike_wrapper.py`：
+  - 优先尝试导入 ALIKE（保留原行为）
+  - 导入失败时自动回退到 `cv2.ORB.create(nfeatures=8000, scoreType=ORB_FAST_SCORE)`
+  - `extract_alike_kpts()` 接口不变，返回 (N, 2) 关键点坐标
+- 简化 `modules/training/losses.py` 中的 `_HAVE_ALIKE` 为始终 `True`（因为 ORB 回退保证可用）
+- 修复 `F.log_softmax(kpts)` 缺少 `dim` 参数的 deprecation warning
+
+**验证**（dry-run 3 步）：
+```
+acc_kp: 0.014  (之前为 1.000 占位符)
+```
+acc_kp 不再是无意义的 1.0，现在具有实际的 keypoint 定位精度意义。
+
+**影响**：完全向后兼容。ORB 抽取速度比 ALIKE 更快（纯 CPU，无深度学习推理），且无需额外模型文件。
