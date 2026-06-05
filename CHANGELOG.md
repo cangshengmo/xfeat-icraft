@@ -175,22 +175,26 @@ checkpoints/{model}-{dataset}-{timestamp}/
 
 ---
 
-### 01:00 — RMSE 统计鲁棒性改进
+### 01:00 — RMSE 统计鲁棒性改进（cap → log 变换）
 
-**动机**：少量灾难性失败样本（RMSE > 100px）会严重拉高 mean RMSE，掩盖模型真实性能。
+**动机**：硬截断（cap）产生不连续的统计量，且丢失了超出阈值的幅度信息。
 
 **操作**：
-- 在 `xfeat_sar_opt_eval.py` 中添加 `--rmse-cap` 参数（默认 100px）
-- 计算 mean 时对单个 RMSE 进行截断，超出 cap 的样本按 cap 值计算
-- 新增 `mean_capped@{cap}` 和 `P95` 指标输出，同时保留原始 mean 作为参考
-- 统计被截断样本数 `capped={N}/{total}`
+- 将 `--rmse-cap` 替换为 `--rmse-transform`（支持 `none` / `cap` / `log`）
+- `log` 模式（默认）：对超出阈值（默认 10px）的 RMSE 做对数压缩：
+  ```
+  rmse' = threshold + threshold * log(1 + (rmse - threshold) / threshold)
+  ```
+  该函数**处处连续可导**，小幅值基本不变，大幅值平滑压缩：
+  - 12px → 12.0px (几乎不变)
+  - 60px → 28.0px
+  - 338px → 45.2px
+- 新增 `affected={N}/{total}` 统计被变换的样本数
 
 **示例输出**（预训练模型）：
 ```
 Summary: cases=30, valid=30, <=5px=12, <=10px=22, median=5.81px, mean=40.86px
-         mean_capped@100=20.52px  P95=285.87px  capped=4/30 samples
-Accepted: cases=18, <=5px=12, <=10px=18, median=4.04px, mean=4.91px
-         P95=9.10px
+         mean_log@10=11.58px  P95=285.87px  affected=8/30 samples
 ```
 
-**影响**：向后兼容（默认 cap=100），不影响 CSV 输出内容。
+**影响**：向后兼容，默认 `--rmse-transform=log --rmse-threshold=10`。

@@ -64,7 +64,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scales", default="1.0", help="对 SAR 图像额外施加的合成尺度，逗号分隔。")
     parser.add_argument("--min-accept-inliers", type=int, default=0, help="质量门控：RANSAC 内点数至少达到该值才标记为 accepted。")
     parser.add_argument("--min-accept-ratio", type=float, default=0.0, help="质量门控：RANSAC 内点比例至少达到该值才标记为 accepted。")
-    parser.add_argument("--rmse-cap", type=float, default=100.0, help="RMSE 上限（像素），超过该值的样本按该值截断后再计算 mean RMSE。0 表示不截断。")
+    parser.add_argument(
+        "--rmse-transform",
+        type=str,
+        default="log",
+        choices=["none", "cap", "log"],
+        help="RMSE 鲁棒聚合方式："
+             "none=原始值；"
+             "cap=硬截断（结合 --rmse-threshold）；"
+             "log=对数压缩（推荐，默认），对超出阈值的部分做对数平滑。",
+    )
+    parser.add_argument("--rmse-threshold", type=float, default=10.0, help="RMSE 变换阈值（像素），仅对超出该值的部分做处理。")
     parser.add_argument("--max-draw", type=int, default=250, help="每张连线图最多绘制多少条匹配线。")
     parser.add_argument("--no-images", action="store_true", help="只输出 CSV，不保存连线图。")
     parser.add_argument("--force-cpu", action="store_true", help="强制使用 CPU，默认优先使用 CUDA。")
@@ -257,6 +267,20 @@ def transform_points(points: np.ndarray, matrix: np.ndarray) -> np.ndarray:
 
     pts = points.reshape(1, -1, 2).astype(np.float64)
     return cv2.perspectiveTransform(pts, matrix).reshape(-1, 2)
+
+
+def rmse_transform(values: np.ndarray, mode: str, threshold: float) -> np.ndarray:
+    """对 RMSE 数组做鲁棒聚合变换，降低极端大值的拉偏影响。"""
+    if mode == "none":
+        return values
+    if mode == "cap":
+        return np.clip(values, None, threshold)
+    # mode == "log": 对数压缩，超出 threshold 的部分平滑压缩
+    out = values.copy()
+    mask = values > threshold
+    if mask.any():
+        out[mask] = threshold + threshold * np.log(1.0 + (values[mask] - threshold) / threshold)
+    return out
 
 
 def corner_rmse(matrix: np.ndarray | None, width: int, height: int, gt_aug_to_opt: np.ndarray) -> float:
@@ -462,14 +486,18 @@ def main() -> None:
     valid_rmse = np.array([float(row["corner_rmse"]) for row in rows if not math.isnan(float(row["corner_rmse"]))])
     print(f"\nCSV: {csv_path}")
     if len(valid_rmse):
-        rmse_cap = args.rmse_cap
-        if rmse_cap > 0:
-            capped_rmse = np.clip(valid_rmse, None, rmse_cap)
-            capped_mean = np.mean(capped_rmse)
-            n_capped = int((valid_rmse > rmse_cap).sum())
+        # Transform RMSE for robust mean computation
+        mode = args.rmse_transform
+        thr = args.rmse_threshold
+        transformed = rmse_transform(valid_rmse, mode, thr)
+        robust_mean = np.mean(transformed)
+
+        if mode == "none":
+            label = f"mean"
+        elif mode == "cap":
+            label = f"mean_cap@{thr:g}"
         else:
-            capped_mean = np.mean(valid_rmse)
-            n_capped = 0
+            label = f"mean_log@{thr:g}"
 
         p95 = float(np.percentile(valid_rmse, 95))
         print(
@@ -479,12 +507,13 @@ def main() -> None:
             f"median={np.median(valid_rmse):.2f}px, "
             f"mean={np.mean(valid_rmse):.2f}px"
         )
-        if rmse_cap > 0:
+        if mode != "none":
+            n_affected = int((valid_rmse > thr).sum())
             print(
                 f"         "
-                f"mean_capped@{rmse_cap:.0f}={capped_mean:.2f}px  "
+                f"{label}={robust_mean:.2f}px  "
                 f"P95={p95:.2f}px  "
-                f"capped={n_capped}/{len(valid_rmse)} samples"
+                f"affected={n_affected}/{len(valid_rmse)} samples"
             )
         accepted_rmse = np.array(
             [
