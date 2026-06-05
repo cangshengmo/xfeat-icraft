@@ -5,7 +5,12 @@ from modules.dataset.megadepth import megadepth_warper
 
 from modules.training import utils
 
-from third_party.alike_wrapper import extract_alike_kpts
+try:
+    from third_party.alike_wrapper import extract_alike_kpts
+    _HAVE_ALIKE = True
+except (ImportError, ModuleNotFoundError):
+    _HAVE_ALIKE = False
+    extract_alike_kpts = None
 
 def dual_softmax_loss(X, Y, temp = 0.2):
     if X.size() != Y.size() or X.dim() != 2 or Y.dim() != 2:
@@ -72,6 +77,8 @@ def fine_loss(f1, f2, pts1, pts2, fine_module, ws=7):
 
 
 def alike_distill_loss(kpts, img):
+    if not _HAVE_ALIKE:
+        raise RuntimeError("ALIKE is not available, cannot compute alike_distill_loss")
 
     C, H, W = kpts.shape
     kpts = kpts.permute(1,2,0) 

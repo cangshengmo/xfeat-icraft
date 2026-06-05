@@ -37,13 +37,18 @@ import tqdm
 
 from modules.model import XFeatModel
 from modules.training.losses import (
-    alike_distill_loss,
-    check_accuracy,
+    _HAVE_ALIKE,
     coordinate_classification_loss,
     dual_softmax_loss,
     keypoint_loss,
 )
-from modules.training.utils import get_corresponding_pts, get_nb_trainable_params, make_batch
+from modules.training.utils import check_accuracy, get_corresponding_pts, get_nb_trainable_params, make_batch
+
+# ALIKE keypoint distillation is optional (submodule may be empty)
+if _HAVE_ALIKE:
+    from modules.training.losses import alike_distill_loss
+else:
+    print("[Trainer2350] ALIKE not available — skipping keypoint distillation loss.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -179,10 +184,14 @@ class Trainer2350:
                 loss_ds, conf = dual_softmax_loss(m1, m2)
                 loss_coords, acc_coords = coordinate_classification_loss(coords1, pts1, pts2, conf)
 
-                loss_kp_pos1, acc_pos1 = alike_distill_loss(kpts1[b], p1[b])
-                loss_kp_pos2, acc_pos2 = alike_distill_loss(kpts2[b], p2[b])
-                loss_kp_pos = (loss_kp_pos1 + loss_kp_pos2) * 2.0
-                acc_pos = (acc_pos1 + acc_pos2) / 2.0
+                if _HAVE_ALIKE:
+                    loss_kp_pos1, acc_pos1 = alike_distill_loss(kpts1[b], p1[b])
+                    loss_kp_pos2, acc_pos2 = alike_distill_loss(kpts2[b], p2[b])
+                    loss_kp_pos = (loss_kp_pos1 + loss_kp_pos2) * 2.0
+                    acc_pos = (acc_pos1 + acc_pos2) / 2.0
+                else:
+                    loss_kp_pos = torch.tensor(0.0, device=self.dev)
+                    acc_pos = 1.0
 
                 loss_kp = keypoint_loss(h1, conf) + keypoint_loss(h2, conf)
 
