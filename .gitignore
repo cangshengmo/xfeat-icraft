@@ -6,6 +6,7 @@ __pycache__/
 # Project-generated artifacts
 outputs/
 icraft_compile/
+checkpoints/
 
 # C extensions
 *.so
