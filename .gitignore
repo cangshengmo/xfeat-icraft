@@ -8,6 +8,11 @@ outputs/
 icraft_compile/
 checkpoints/
 
+# Editor / IDE
+.claude/
+.idea/
+.vscode/
+
 # C extensions
 *.so
 

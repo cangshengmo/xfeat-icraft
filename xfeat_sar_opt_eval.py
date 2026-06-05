@@ -39,7 +39,8 @@ def parse_args() -> argparse.Namespace:
         description="XFeat 光学/SAR 特征匹配最小验证，输出 CSV 和绿线内点/红线外点连线图。"
     )
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT, help="包含 opt、sar、label.txt 的数据目录。")
-    parser.add_argument("--xfeat-root", type=Path, default=DEFAULT_XFEAT_ROOT, help="XFeat 官方源码目录。")
+    parser.add_argument("--xfeat-root", type=Path, default=DEFAULT_XFEAT_ROOT, help="XFeat 源码目录。")
+    parser.add_argument("--weights", type=Path, default=None, help="XFeat 权重路径，默认使用 xfeat-root/weights/xfeat.pt。")
     parser.add_argument("--output-dir", type=Path, default=REPO_DIR / "outputs" / "xfeat_sar_opt", help="结果输出目录。")
     parser.add_argument("--limit", type=int, default=10, help="最多评估多少组图像。")
     parser.add_argument("--ids", nargs="*", default=None, help="只评估指定图像 id，例如 100001 100002。")
@@ -151,7 +152,7 @@ def synthetic_sar_view(image: np.ndarray, angle_deg: float, scale: float) -> tup
     return aug, aug_to_src
 
 
-def load_xfeat(xfeat_root: Path, top_k: int, force_cpu: bool):
+def load_xfeat(xfeat_root: Path, top_k: int, force_cpu: bool, weights_path: Path | None = None):
     if not xfeat_root.exists():
         raise FileNotFoundError(
             f"XFeat 源码目录不存在：{xfeat_root}\n"
@@ -160,20 +161,24 @@ def load_xfeat(xfeat_root: Path, top_k: int, force_cpu: bool):
     sys.path.insert(0, str(xfeat_root))
     from modules.xfeat import XFeat
 
-    weights = xfeat_root / "weights" / "xfeat.pt"
-    if not weights.exists():
-        raise FileNotFoundError(f"XFeat 权重不存在：{weights}")
+    if weights_path is not None and weights_path.exists():
+        weights: str = str(weights_path)
+        print(f"[load_xfeat] 使用自定义权重：{weights_path}")
+    else:
+        weights = str(xfeat_root / "weights" / "xfeat.pt")
+        if not Path(weights).exists():
+            raise FileNotFoundError(f"XFeat 权重不存在：{weights}")
 
     if force_cpu:
         original = torch.cuda.is_available
         torch.cuda.is_available = lambda: False
         try:
-            model = XFeat(weights=str(weights), top_k=top_k)
+            model = XFeat(weights=weights, top_k=top_k)
         finally:
             torch.cuda.is_available = original
         return model
 
-    return XFeat(weights=str(weights), top_k=top_k)
+    return XFeat(weights=weights, top_k=top_k)
 
 
 @torch.inference_mode()
@@ -351,7 +356,7 @@ def main() -> None:
     labels = selected_labels(read_labels(args.data_root / "label.txt"), args.ids, args.limit)
     angles = parse_float_list(args.angles)
     scales = parse_float_list(args.scales)
-    xfeat = load_xfeat(args.xfeat_root, args.top_k, args.force_cpu)
+    xfeat = load_xfeat(args.xfeat_root, args.top_k, args.force_cpu, weights_path=args.weights)
 
     csv_path = args.output_dir / f"xfeat_{args.preprocess}_{args.model}_summary.csv"
     fieldnames = [
