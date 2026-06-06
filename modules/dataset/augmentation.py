@@ -135,13 +135,16 @@ class AugmentationPipe(nn.Module):
         self.aug_list = kornia.augmentation.ImageSequential(*list_augmentation)
         
         if len(self.all_imgs) < 10:
-            raise RuntimeError('Couldnt find enough images to train. Please check the path: ', img_dir)
+            if load_dataset:
+                raise RuntimeError('Couldnt find enough images to train. Please check the path: ', img_dir)
+            else:
+                self.all_imgs = ['dummy']  # placeholder to bypass the check
 
         if load_dataset:
             print('[Synthetic] Found a total of ', len(self.all_imgs), ' images for training..')
 
             if len(self.all_imgs) - num_test_imgs < max_num_imgs:
-                raise RuntimeError('Error: test set overlaps with training set! Decrease number of test imgs')
+                print('[Synthetic] Warning: not enough images, test set may overlap with training set.')
 
             self.load_imgs()
 

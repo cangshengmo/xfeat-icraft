@@ -39,7 +39,8 @@ def parse_args() -> argparse.Namespace:
         description="XFeat 光学/SAR 特征匹配最小验证，输出 CSV 和绿线内点/红线外点连线图。"
     )
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT, help="包含 opt、sar、label.txt 的数据目录。")
-    parser.add_argument("--xfeat-root", type=Path, default=DEFAULT_XFEAT_ROOT, help="XFeat 官方源码目录。")
+    parser.add_argument("--xfeat-root", type=Path, default=DEFAULT_XFEAT_ROOT, help="XFeat 源码目录。")
+    parser.add_argument("--weights", type=Path, default=None, help="XFeat 权重路径，默认使用 xfeat-root/weights/xfeat.pt。")
     parser.add_argument("--output-dir", type=Path, default=REPO_DIR / "outputs" / "xfeat_sar_opt", help="结果输出目录。")
     parser.add_argument("--limit", type=int, default=10, help="最多评估多少组图像。")
     parser.add_argument("--ids", nargs="*", default=None, help="只评估指定图像 id，例如 100001 100002。")
@@ -63,6 +64,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scales", default="1.0", help="对 SAR 图像额外施加的合成尺度，逗号分隔。")
     parser.add_argument("--min-accept-inliers", type=int, default=0, help="质量门控：RANSAC 内点数至少达到该值才标记为 accepted。")
     parser.add_argument("--min-accept-ratio", type=float, default=0.0, help="质量门控：RANSAC 内点比例至少达到该值才标记为 accepted。")
+    parser.add_argument(
+        "--rmse-transform",
+        type=str,
+        default="log",
+        choices=["none", "cap", "log"],
+        help="RMSE 鲁棒聚合方式："
+             "none=原始值；"
+             "cap=硬截断（结合 --rmse-threshold）；"
+             "log=对数压缩（推荐，默认），对超出阈值的部分做对数平滑。",
+    )
+    parser.add_argument("--rmse-threshold", type=float, default=10.0, help="RMSE 变换阈值（像素），仅对超出该值的部分做处理。")
     parser.add_argument("--max-draw", type=int, default=250, help="每张连线图最多绘制多少条匹配线。")
     parser.add_argument("--no-images", action="store_true", help="只输出 CSV，不保存连线图。")
     parser.add_argument("--force-cpu", action="store_true", help="强制使用 CPU，默认优先使用 CUDA。")
@@ -151,7 +163,7 @@ def synthetic_sar_view(image: np.ndarray, angle_deg: float, scale: float) -> tup
     return aug, aug_to_src
 
 
-def load_xfeat(xfeat_root: Path, top_k: int, force_cpu: bool):
+def load_xfeat(xfeat_root: Path, top_k: int, force_cpu: bool, weights_path: Path | None = None):
     if not xfeat_root.exists():
         raise FileNotFoundError(
             f"XFeat 源码目录不存在：{xfeat_root}\n"
@@ -160,20 +172,29 @@ def load_xfeat(xfeat_root: Path, top_k: int, force_cpu: bool):
     sys.path.insert(0, str(xfeat_root))
     from modules.xfeat import XFeat
 
-    weights = xfeat_root / "weights" / "xfeat.pt"
-    if not weights.exists():
-        raise FileNotFoundError(f"XFeat 权重不存在：{weights}")
+    if weights_path is not None and weights_path.exists():
+        ckpt = torch.load(str(weights_path), map_location="cpu")
+        if isinstance(ckpt, dict) and "model_state" in ckpt:
+            weights = ckpt["model_state"]
+            print(f"[load_xfeat] 使用 best/latest checkpoint（含 model_state）: {weights_path}")
+        else:
+            weights = str(weights_path)
+            print(f"[load_xfeat] 使用自定义权重：{weights_path}")
+    else:
+        weights = str(xfeat_root / "weights" / "xfeat.pt")
+        if not Path(weights).exists():
+            raise FileNotFoundError(f"XFeat 权重不存在：{weights}")
 
     if force_cpu:
         original = torch.cuda.is_available
         torch.cuda.is_available = lambda: False
         try:
-            model = XFeat(weights=str(weights), top_k=top_k)
+            model = XFeat(weights=weights, top_k=top_k)
         finally:
             torch.cuda.is_available = original
         return model
 
-    return XFeat(weights=str(weights), top_k=top_k)
+    return XFeat(weights=weights, top_k=top_k)
 
 
 @torch.inference_mode()
@@ -251,6 +272,20 @@ def transform_points(points: np.ndarray, matrix: np.ndarray) -> np.ndarray:
 
     pts = points.reshape(1, -1, 2).astype(np.float64)
     return cv2.perspectiveTransform(pts, matrix).reshape(-1, 2)
+
+
+def rmse_transform(values: np.ndarray, mode: str, threshold: float) -> np.ndarray:
+    """对 RMSE 数组做鲁棒聚合变换，降低极端大值的拉偏影响。"""
+    if mode == "none":
+        return values
+    if mode == "cap":
+        return np.clip(values, None, threshold)
+    # mode == "log": 对数压缩，超出 threshold 的部分平滑压缩
+    out = values.copy()
+    mask = values > threshold
+    if mask.any():
+        out[mask] = threshold + threshold * np.log(1.0 + (values[mask] - threshold) / threshold)
+    return out
 
 
 def corner_rmse(matrix: np.ndarray | None, width: int, height: int, gt_aug_to_opt: np.ndarray) -> float:
@@ -351,7 +386,7 @@ def main() -> None:
     labels = selected_labels(read_labels(args.data_root / "label.txt"), args.ids, args.limit)
     angles = parse_float_list(args.angles)
     scales = parse_float_list(args.scales)
-    xfeat = load_xfeat(args.xfeat_root, args.top_k, args.force_cpu)
+    xfeat = load_xfeat(args.xfeat_root, args.top_k, args.force_cpu, weights_path=args.weights)
 
     csv_path = args.output_dir / f"xfeat_{args.preprocess}_{args.model}_summary.csv"
     fieldnames = [
@@ -456,12 +491,35 @@ def main() -> None:
     valid_rmse = np.array([float(row["corner_rmse"]) for row in rows if not math.isnan(float(row["corner_rmse"]))])
     print(f"\nCSV: {csv_path}")
     if len(valid_rmse):
+        # Transform RMSE for robust mean computation
+        mode = args.rmse_transform
+        thr = args.rmse_threshold
+        transformed = rmse_transform(valid_rmse, mode, thr)
+        robust_mean = np.mean(transformed)
+
+        if mode == "none":
+            label = f"mean"
+        elif mode == "cap":
+            label = f"mean_cap@{thr:g}"
+        else:
+            label = f"mean_log@{thr:g}"
+
+        p95 = float(np.percentile(valid_rmse, 95))
         print(
             "Summary: "
             f"cases={len(rows)}, valid={len(valid_rmse)}, "
             f"<=5px={(valid_rmse <= 5).sum()}, <=10px={(valid_rmse <= 10).sum()}, "
-            f"median={np.median(valid_rmse):.2f}px, mean={np.mean(valid_rmse):.2f}px"
+            f"median={np.median(valid_rmse):.2f}px, "
+            f"mean={np.mean(valid_rmse):.2f}px"
         )
+        if mode != "none":
+            n_affected = int((valid_rmse > thr).sum())
+            print(
+                f"         "
+                f"{label}={robust_mean:.2f}px  "
+                f"P95={p95:.2f}px  "
+                f"affected={n_affected}/{len(valid_rmse)} samples"
+            )
         accepted_rmse = np.array(
             [
                 float(row["corner_rmse"])
@@ -471,12 +529,14 @@ def main() -> None:
         )
         if args.min_accept_inliers > 0 or args.min_accept_ratio > 0:
             if len(accepted_rmse):
+                p95_acc = float(np.percentile(accepted_rmse, 95))
                 print(
                     "Accepted: "
                     f"cases={len(accepted_rmse)}, "
                     f"<=5px={(accepted_rmse <= 5).sum()}, <=10px={(accepted_rmse <= 10).sum()}, "
                     f"median={np.median(accepted_rmse):.2f}px, mean={np.mean(accepted_rmse):.2f}px"
                 )
+                print(f"         P95={p95_acc:.2f}px")
             else:
                 print("Accepted: cases=0")
     else:

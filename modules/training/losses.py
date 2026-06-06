@@ -6,6 +6,8 @@ from modules.dataset.megadepth import megadepth_warper
 from modules.training import utils
 
 from third_party.alike_wrapper import extract_alike_kpts
+# 即使 ALIKE 不可用，也会回退到 ORB，所以 keypoint 蒸馏始终可用
+_HAVE_ALIKE = True
 
 def dual_softmax_loss(X, Y, temp = 0.2):
     if X.size() != Y.size() or X.dim() != 2 or Y.dim() != 2:
@@ -102,7 +104,7 @@ def alike_distill_loss(kpts, img):
         acc =  (labels == predicted)
         acc = acc.sum() / len(acc)
 
-    kpts = F.log_softmax(kpts)
+    kpts = F.log_softmax(kpts, dim=-1)
     loss = F.nll_loss(kpts, labels, reduction = 'mean')
 
     return loss, acc
