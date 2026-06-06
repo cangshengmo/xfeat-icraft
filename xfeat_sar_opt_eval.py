@@ -173,8 +173,13 @@ def load_xfeat(xfeat_root: Path, top_k: int, force_cpu: bool, weights_path: Path
     from modules.xfeat import XFeat
 
     if weights_path is not None and weights_path.exists():
-        weights: str = str(weights_path)
-        print(f"[load_xfeat] 使用自定义权重：{weights_path}")
+        ckpt = torch.load(str(weights_path), map_location="cpu")
+        if isinstance(ckpt, dict) and "model_state" in ckpt:
+            weights = ckpt["model_state"]
+            print(f"[load_xfeat] 使用 best/latest checkpoint（含 model_state）: {weights_path}")
+        else:
+            weights = str(weights_path)
+            print(f"[load_xfeat] 使用自定义权重：{weights_path}")
     else:
         weights = str(xfeat_root / "weights" / "xfeat.pt")
         if not Path(weights).exists():

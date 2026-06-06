@@ -67,6 +67,9 @@ class SAROptAugmentationPipe(AugmentationPipe):
             **kwargs,
         )
 
+        # Restore our max_num_imgs (parent's __init__ may have overwritten it)
+        self.max_num_imgs = max_num_imgs
+
         # Now manually load images
         self.load_imgs()
 
@@ -95,12 +98,13 @@ class SAROptAugmentationPipe(AugmentationPipe):
         def _load_list(path_list, desc):
             out = []
             for p in tqdm.tqdm(path_list, desc=desc):
-                im = cv2.imread(p)
+                im = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
                 if im is None:
                     continue
                 if im.shape[1] != target_size[0] or im.shape[0] != target_size[1]:
                     im = cv2.resize(im, target_size)
-                out.append(np.copy(im))
+                # Expand grayscale (H,W) → (H,W,3) for AugmentationPipe
+                out.append(np.repeat(np.copy(im)[..., None], 3, axis=-1))
             return out
 
         self.train = _load_list(train_paths, "[SAROpt] loading train")
@@ -165,28 +169,88 @@ class SAROptPairDataset(torch.utils.data.Dataset):
             return cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         raise ValueError(f"Unknown preprocess: {mode}")
 
+
+class SEN12CrossModalDataset(torch.utils.data.Dataset):
+    """
+    Dataset that yields (sar_image, opt_image, identity_homography) pairs from
+    the SEN1-2_256 dataset.
+
+    SEN1-2 images are 256x256 and already perfectly pixel-aligned between
+    SAR and optical modalities.  The homography is the 3×3 identity matrix,
+    meaning ``opt[x, y]`` corresponds to ``sar[x, y]``.
+
+    Directory structure expected::
+
+        {data_root}/
+            sar/  0.bmp  1.bmp  …
+            opt/  0.bmp  1.bmp  …
+    """
+
+    def __init__(
+        self,
+        data_root: str | Path,
+        resolution: tuple[int, int] = (256, 256),
+        preprocess: str = "grad",
+        limit: int = 0,
+    ):
+        self.data_root = Path(data_root)
+        self.resolution = resolution  # (W, H)
+        self.preprocess = preprocess
+
+        sar_dir = self.data_root / "sar"
+        opt_dir = self.data_root / "opt"
+        # Collect common filenames
+        sar_names = sorted({p.stem for p in sar_dir.glob("*.*")})
+        opt_names = sorted({p.stem for p in opt_dir.glob("*.*")})
+        self.ids = sorted(set(sar_names) & set(opt_names))
+
+        if limit > 0:
+            self.ids = self.ids[:limit]
+
+        print(f"[SEN12Cross] {len(self.ids)} aligned pairs from {self.data_root}")
+
+    def _find(self, subdir, stem):
+        folder = self.data_root / subdir
+        for ext in (".bmp", ".png", ".jpg", ".jpeg"):
+            p = folder / f"{stem}{ext}"
+            if p.exists():
+                return p
+        raise FileNotFoundError(f"{folder / stem}.*")
+
+    def _preprocess(self, img):
+        if self.preprocess == "raw":
+            return img
+        if self.preprocess == "grad":
+            blur = cv2.GaussianBlur(img, (3, 3), 0)
+            gx = cv2.Sobel(blur, cv2.CV_32F, 1, 0, ksize=3)
+            gy = cv2.Sobel(blur, cv2.CV_32F, 0, 1, ksize=3)
+            mag = cv2.magnitude(gx, gy)
+            return cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        return img
+
     def __len__(self):
-        return len(self.labels)
+        return len(self.ids)
 
     def __getitem__(self, idx):
-        row = self.labels[idx]
-        sar_path = self._find_image("sar", row["id"])
-        opt_path = self._find_image("opt", row["id"])
+        sid = self.ids[idx]
+        sar = cv2.imread(str(self._find("sar", sid)), cv2.IMREAD_GRAYSCALE)
+        opt = cv2.imread(str(self._find("opt", sid)), cv2.IMREAD_GRAYSCALE)
 
-        sar = cv2.imread(str(sar_path), cv2.IMREAD_GRAYSCALE)
-        opt = cv2.imread(str(opt_path), cv2.IMREAD_GRAYSCALE)
+        sar = self._preprocess(sar)
+        opt = self._preprocess(opt)
 
-        sar = self._preprocess(sar, self.preprocess)
-        opt = self._preprocess(opt, self.preprocess)
+        W, H = self.resolution
+        if sar.shape[1] != W or sar.shape[0] != H:
+            sar = cv2.resize(sar, (W, H))
+        if opt.shape[1] != W or opt.shape[0] != H:
+            opt = cv2.resize(opt, (W, H))
 
-        # Build homography: translation-only from label.txt
-        # SAR (512x512) is placed at (x, y) in OPT (800x800)
-        H = np.eye(3, dtype=np.float32)
-        H[0, 2] = row["x"]
-        H[1, 2] = row["y"]
+        # Identity homography: SAR ↔ OPT are pixel-aligned
+        H_mat = torch.eye(3, dtype=torch.float32)
 
         sar_t = torch.from_numpy(sar).float().unsqueeze(0) / 255.0
         opt_t = torch.from_numpy(opt).float().unsqueeze(0) / 255.0
-        H_t = torch.from_numpy(H)
+        return sar_t, opt_t, H_mat
 
-        return sar_t, opt_t, H_t
+    def __len__(self):
+        return len(self.ids)
